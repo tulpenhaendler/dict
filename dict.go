@@ -38,6 +38,14 @@ const (
 
 	// IPFS
 	KeyIPFSCID = codec.KeyIPFSCID
+
+	// Multi-chain
+	KeyBech32         = codec.KeyBech32
+	KeySolanaAddress  = codec.KeySolanaAddress
+	KeySolanaSig      = codec.KeySolanaSig
+	KeySS58           = codec.KeySS58
+	KeyBitcoinAddress = codec.KeyBitcoinAddress
+	KeyNumericString  = codec.KeyNumericString
 )
 
 const defaultCacheSize = 200_000

@@ -32,7 +32,15 @@ const (
 	// IPFS (0x30-0x3F)
 	KeyIPFSCID KeyType = 0x30 // auto-detect Qm.../bafy.../bafk.../bafyr... → tag + digest
 
-	MaxKeyType = 0x40 // bump when adding types
+	// Multi-chain (0x40-0x4F)
+	KeyBech32          KeyType = 0x40 // any bech32/bech32m (Bitcoin segwit, Cosmos, Cardano)
+	KeySolanaAddress   KeyType = 0x41 // base58, 32 bytes
+	KeySolanaSig       KeyType = 0x42 // base58, 64 bytes
+	KeySS58            KeyType = 0x43 // Substrate/Polkadot base58
+	KeyBitcoinAddress  KeyType = 0x44 // legacy base58check (1.../3...)
+	KeyNumericString   KeyType = 0x45 // decimal string → varint
+
+	MaxKeyType = 0x50 // bump when adding types
 )
 
 // Codec encodes and decodes keys for a given KeyType.
@@ -70,6 +78,14 @@ func init() {
 
 	// IPFS
 	Codecs[KeyIPFSCID] = ipfsCIDCodec{}
+
+	// Multi-chain
+	Codecs[KeyBech32] = bech32Codec{}
+	Codecs[KeySolanaAddress] = solanaAddressCodec{}
+	Codecs[KeySolanaSig] = solanaSigCodec{}
+	Codecs[KeySS58] = ss58Codec{}
+	Codecs[KeyBitcoinAddress] = bitcoinAddressCodec{}
+	Codecs[KeyNumericString] = numericStringCodec{}
 }
 
 // Get returns the codec for the given key type, or nil.
