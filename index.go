@@ -123,8 +123,7 @@ func idxFileSize(slotCount uint32) int {
 }
 
 // lookup probes the hash table for a key. Returns (id, true) if found.
-// The caller must verify the actual key bytes via the data log.
-// found is set only when the encoded key matches.
+// Uses matchEntry for zero-allocation key verification.
 func (ix *hashIndex) lookup(h uint32, cb byte, keyType KeyType, encoded []byte, dat *dataLog) (uint32, bool) {
 	mask := ix.slotCount - 1
 	pos := h & mask
@@ -135,8 +134,7 @@ func (ix *hashIndex) lookup(h uint32, cb byte, keyType KeyType, encoded []byte, 
 		}
 		if c == cb {
 			id, off := ix.readSlot(pos)
-			kt, enc, err := dat.readEntry(int64(off))
-			if err == nil && kt == keyType && bytesEqual(enc, encoded) {
+			if dat.matchEntry(int64(off), keyType, encoded) {
 				return id, true
 			}
 		}
@@ -253,14 +251,3 @@ func (ix *hashIndex) close() error {
 	return ix.f.Close()
 }
 
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}

@@ -135,7 +135,12 @@ func (d *Dict) Exists(s string, keyType KeyType) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	h := hashKey(keyType, encoded)
+	var h uint32
+	if keyType == KeyRaw {
+		h = hashKeyString(keyType, s)
+	} else {
+		h = hashKey(keyType, encoded)
+	}
 	cb := ctrlByte(h)
 	_, found := d.idx.lookup(h, cb, keyType, encoded, d.dat)
 	return found, nil
@@ -195,6 +200,9 @@ func (d *Dict) getFromDisk(s string, keyType KeyType) (uint32, error) {
 	if codec == nil {
 		return 0, fmt.Errorf("dict: unknown key type %d", keyType)
 	}
+
+	// For raw keys, hash directly from string (zero-alloc) and use
+	// unsafe string-to-bytes for the encoded form (also zero-alloc).
 	encoded, err := codec.Encode(s)
 	if err != nil {
 		return 0, fmt.Errorf("dict: encode: %w", err)
@@ -203,13 +211,20 @@ func (d *Dict) getFromDisk(s string, keyType KeyType) (uint32, error) {
 		return 0, fmt.Errorf("dict: encoded key too long: %d bytes", len(encoded))
 	}
 
-	h := hashKey(keyType, encoded)
+	var h uint32
+	if keyType == KeyRaw {
+		h = hashKeyString(keyType, s)
+	} else {
+		h = hashKey(keyType, encoded)
+	}
 	cb := ctrlByte(h)
 
 	if id, found := d.idx.lookup(h, cb, keyType, encoded, d.dat); found {
 		return id, nil
 	}
 
+	// Insert — for raw codec, encoded is a view into the string via unsafe,
+	// but append copies it to disk so that's fine.
 	datOffset, err := d.dat.append(keyType, encoded)
 	if err != nil {
 		return 0, fmt.Errorf("dict: append: %w", err)
