@@ -10,9 +10,9 @@ import (
 
 const (
 	IdxMagic      = 0x58444944 // "DIDX"
-	IdxVersion    = 1
+	IdxVersion    = 2          // v2: uint64 IDs
 	IdxHeaderSize = 64
-	SlotSize      = 12
+	SlotSize      = 16 // id(8) + datOffset(8)
 	InitialSlots  = 1 << 16
 	MaxLoadNum    = 7
 	MaxLoadDen    = 10
@@ -23,8 +23,8 @@ type IdxHeader struct {
 	Version     uint32
 	SlotCount   uint32
 	LiveEntries uint32
-	NextID      uint32
-	_           [44]byte
+	NextID      uint64
+	_           [40]byte
 }
 
 type HashIndex struct {
@@ -109,7 +109,7 @@ func IdxFileSize(slotCount uint32) int {
 	return IdxHeaderSize + int(slotCount) + int(slotCount)*SlotSize
 }
 
-func (ix *HashIndex) Lookup(h uint32, cb byte, match func(int64) bool) (uint32, bool) {
+func (ix *HashIndex) Lookup(h uint32, cb byte, match func(int64) bool) (uint64, bool) {
 	mask := ix.SlotCount - 1
 	pos := h & mask
 	for {
@@ -127,7 +127,7 @@ func (ix *HashIndex) Lookup(h uint32, cb byte, match func(int64) bool) (uint32, 
 	}
 }
 
-func (ix *HashIndex) Insert(h uint32, cb byte, id uint32, datOffset int64) {
+func (ix *HashIndex) Insert(h uint32, cb byte, id uint64, datOffset int64) {
 	mask := ix.SlotCount - 1
 	pos := h & mask
 	for {
@@ -186,19 +186,19 @@ func (ix *HashIndex) Grow(rebuild func(*HashIndex) error) error {
 	return nil
 }
 
-func (ix *HashIndex) ReadSlot(pos uint32) (id uint32, datOffset uint64) {
+func (ix *HashIndex) ReadSlot(pos uint32) (id uint64, datOffset uint64) {
 	base := ix.slotBase + uintptr(pos)*SlotSize
 	slot := unsafe.Slice((*byte)(unsafe.Pointer(base)), SlotSize)
-	id = binary.LittleEndian.Uint32(slot[0:4])
-	datOffset = binary.LittleEndian.Uint64(slot[4:12])
+	id = binary.LittleEndian.Uint64(slot[0:8])
+	datOffset = binary.LittleEndian.Uint64(slot[8:16])
 	return
 }
 
-func (ix *HashIndex) WriteSlot(pos uint32, id uint32, datOffset uint64) {
+func (ix *HashIndex) WriteSlot(pos uint32, id uint64, datOffset uint64) {
 	base := ix.slotBase + uintptr(pos)*SlotSize
 	slot := unsafe.Slice((*byte)(unsafe.Pointer(base)), SlotSize)
-	binary.LittleEndian.PutUint32(slot[0:4], id)
-	binary.LittleEndian.PutUint64(slot[4:12], datOffset)
+	binary.LittleEndian.PutUint64(slot[0:8], id)
+	binary.LittleEndian.PutUint64(slot[8:16], datOffset)
 }
 
 func Msync(b []byte) error {

@@ -17,15 +17,15 @@ const (
 
 type revHeader struct {
 	Magic    uint32
-	Capacity uint32
-	_        [8]byte
+	_        uint32 // reserved
+	Capacity uint64
 }
 
 type ReverseIndex struct {
 	f        *os.File
 	data     []byte
 	header   *revHeader
-	Capacity uint32
+	Capacity uint64
 }
 
 func OpenReverse(path string) (*ReverseIndex, error) {
@@ -39,7 +39,7 @@ func OpenReverse(path string) (*ReverseIndex, error) {
 		return nil, err
 	}
 	if info.Size() == 0 {
-		cap := uint32(RevGrowChunk)
+		cap := uint64(RevGrowChunk)
 		size := revFileSize(cap)
 		if err := f.Truncate(int64(size)); err != nil {
 			f.Close()
@@ -63,13 +63,13 @@ func OpenReverse(path string) (*ReverseIndex, error) {
 		f.Close()
 		return nil, fmt.Errorf("dict: bad reverse magic %x", magic)
 	}
-	cap := BO.Uint32(buf[4:8])
+	cap := BO.Uint64(buf[8:16])
 	return mmapReverse(f, cap)
 }
 
-func mmapReverse(f *os.File, cap uint32) (*ReverseIndex, error) {
+func mmapReverse(f *os.File, cap uint64) (*ReverseIndex, error) {
 	size := revFileSize(cap)
-	data, err := syscall.Mmap(int(f.Fd()), 0, size, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
+	data, err := syscall.Mmap(int(f.Fd()), 0, int(size), syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
 	if err != nil {
 		f.Close()
 		return nil, fmt.Errorf("dict: mmap reverse: %w", err)
@@ -82,11 +82,11 @@ func mmapReverse(f *os.File, cap uint32) (*ReverseIndex, error) {
 	}, nil
 }
 
-func revFileSize(cap uint32) int {
-	return RevHeaderSize + int(cap)*RevEntrySize
+func revFileSize(cap uint64) int64 {
+	return int64(RevHeaderSize) + int64(cap)*RevEntrySize
 }
 
-func (r *ReverseIndex) Set(id uint32, datOffset int64) error {
+func (r *ReverseIndex) Set(id uint64, datOffset int64) error {
 	if id >= r.Capacity {
 		if err := r.grow(id); err != nil {
 			return err
@@ -97,7 +97,7 @@ func (r *ReverseIndex) Set(id uint32, datOffset int64) error {
 	return nil
 }
 
-func (r *ReverseIndex) Get(id uint32) (int64, error) {
+func (r *ReverseIndex) Get(id uint64) (int64, error) {
 	if id >= r.Capacity {
 		return 0, fmt.Errorf("dict: reverse id %d out of range (cap %d)", id, r.Capacity)
 	}
@@ -105,7 +105,7 @@ func (r *ReverseIndex) Get(id uint32) (int64, error) {
 	return int64(binary.LittleEndian.Uint64(r.data[off : off+8])), nil
 }
 
-func (r *ReverseIndex) grow(needID uint32) error {
+func (r *ReverseIndex) grow(needID uint64) error {
 	newCap := r.Capacity
 	for needID >= newCap {
 		newCap += RevGrowChunk
@@ -117,7 +117,7 @@ func (r *ReverseIndex) grow(needID uint32) error {
 	if err := r.f.Truncate(int64(size)); err != nil {
 		return err
 	}
-	data, err := syscall.Mmap(int(r.f.Fd()), 0, size, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
+	data, err := syscall.Mmap(int(r.f.Fd()), 0, int(size), syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
 	if err != nil {
 		return fmt.Errorf("dict: mmap reverse after grow: %w", err)
 	}

@@ -64,7 +64,7 @@ func TestReverse(t *testing.T) {
 	d.Get("gamma", KeyRaw)
 
 	for id, want := range []string{"alpha", "beta", "gamma"} {
-		got, kt, err := d.Reverse(uint32(id))
+		got, kt, err := d.Reverse(uint64(id))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -125,7 +125,7 @@ func TestGrow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Get(%q) at i=%d: %v", key, i, err)
 		}
-		if id != uint32(i) {
+		if id != uint64(i) {
 			t.Fatalf("Get(%q) = %d, want %d", key, id, i)
 		}
 	}
@@ -139,7 +139,7 @@ func TestGrow(t *testing.T) {
 	}
 
 	for i := 0; i < n; i++ {
-		s, _, err := d.Reverse(uint32(i))
+		s, _, err := d.Reverse(uint64(i))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -264,12 +264,12 @@ func TestTezosAddressInDict(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Get(%s): %v", addr, err)
 		}
-		if id != uint32(i) {
+		if id != uint64(i) {
 			t.Fatalf("Get(%s) = %d, want %d", addr, id, i)
 		}
 	}
 	for i, addr := range addrs {
-		s, kt, _ := d.Reverse(uint32(i))
+		s, kt, _ := d.Reverse(uint64(i))
 		if kt != KeyTezosAddress || s != addr {
 			t.Fatalf("Reverse(%d) = %q, want %q", i, s, addr)
 		}
@@ -303,18 +303,18 @@ func TestTezosTypesInDict(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Get(%s): %v", tc.value, err)
 		}
-		if id != uint32(i) {
+		if id != uint64(i) {
 			t.Fatalf("Get(%s) = %d, want %d", tc.value, id, i)
 		}
 
 		// upsert
 		id2, _ := d.Get(tc.value, tc.keyType)
-		if id2 != uint32(i) {
+		if id2 != uint64(i) {
 			t.Fatalf("upsert %s: %d != %d", tc.value, id2, i)
 		}
 
 		// reverse
-		s, kt, _ := d.Reverse(uint32(i))
+		s, kt, _ := d.Reverse(uint64(i))
 		if kt != tc.keyType || s != tc.value {
 			t.Fatalf("Reverse(%d): got %q, want %q", i, s, tc.value)
 		}
@@ -357,12 +357,12 @@ func TestEVMTypesInDict(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Get(%s): %v", tc.value, err)
 		}
-		if id != uint32(i) {
+		if id != uint64(i) {
 			t.Fatalf("Get(%s) = %d, want %d", tc.value, id, i)
 		}
 		// upsert
 		id2, _ := d.Get(tc.value, tc.keyType)
-		if id2 != uint32(i) {
+		if id2 != uint64(i) {
 			t.Fatalf("upsert: %d != %d", id2, i)
 		}
 	}
@@ -386,10 +386,10 @@ func TestIPFSCIDInDict(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Get(%s): %v", cid, err)
 		}
-		if id != uint32(i) {
+		if id != uint64(i) {
 			t.Fatalf("Get(%s) = %d, want %d", cid, id, i)
 		}
-		s, kt, _ := d.Reverse(uint32(i))
+		s, kt, _ := d.Reverse(uint64(i))
 		if kt != KeyIPFSCID || s != cid {
 			t.Fatalf("Reverse(%d) = %q, want %q", i, s, cid)
 		}
@@ -416,7 +416,7 @@ func TestGenericEncodingsInDict(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Get(%s): %v", tc.value, err)
 		}
-		if id != uint32(i) {
+		if id != uint64(i) {
 			t.Fatalf("Get(%s) = %d, want %d", tc.value, id, i)
 		}
 	}

@@ -55,12 +55,12 @@ type cacheKey struct {
 	s string
 }
 
-// Dict is a persistent dictionary mapping typed strings to sequential uint32 IDs.
+// Dict is a persistent dictionary mapping typed strings to sequential uint64 IDs.
 type Dict struct {
 	dat   *internal.DataLog
 	idx   *internal.HashIndex
 	rev   *internal.ReverseIndex
-	cache *lru.Cache[cacheKey, uint32]
+	cache *lru.Cache[cacheKey, uint64]
 }
 
 // Open opens or creates a dictionary at the given base path.
@@ -96,9 +96,9 @@ func OpenWithCacheSize(basePath string, cacheSize int) (*Dict, error) {
 		return nil, fmt.Errorf("dict: open reverse: %w", err)
 	}
 
-	var cache *lru.Cache[cacheKey, uint32]
+	var cache *lru.Cache[cacheKey, uint64]
 	if cacheSize > 0 {
-		cache, err = lru.New[cacheKey, uint32](cacheSize)
+		cache, err = lru.New[cacheKey, uint64](cacheSize)
 		if err != nil {
 			dat.Close()
 			idx.Close()
@@ -120,7 +120,7 @@ func OpenWithCacheSize(basePath string, cacheSize int) (*Dict, error) {
 }
 
 // Get returns the ID for the given key, inserting it if it doesn't exist.
-func (d *Dict) Get(s string, keyType KeyType) (uint32, error) {
+func (d *Dict) Get(s string, keyType KeyType) (uint64, error) {
 	ck := cacheKey{keyType, s}
 	if d.cache != nil {
 		if id, ok := d.cache.Get(ck); ok {
@@ -146,8 +146,8 @@ type BatchEntry struct {
 }
 
 // BatchGet looks up or inserts multiple keys, returning their IDs in the same order.
-func (d *Dict) BatchGet(entries []BatchEntry) ([]uint32, error) {
-	ids := make([]uint32, len(entries))
+func (d *Dict) BatchGet(entries []BatchEntry) ([]uint64, error) {
+	ids := make([]uint64, len(entries))
 	for i, e := range entries {
 		id, err := d.Get(e.Key, e.KeyType)
 		if err != nil {
@@ -188,7 +188,7 @@ func (d *Dict) Exists(s string, keyType KeyType) (bool, error) {
 }
 
 // Reverse returns the string and key type for a given ID.
-func (d *Dict) Reverse(id uint32) (string, KeyType, error) {
+func (d *Dict) Reverse(id uint64) (string, KeyType, error) {
 	if id >= d.idx.Header.NextID {
 		return "", 0, fmt.Errorf("dict: id %d not found (max %d)", id, d.idx.Header.NextID-1)
 	}
@@ -212,7 +212,7 @@ func (d *Dict) Reverse(id uint32) (string, KeyType, error) {
 }
 
 // Len returns the number of entries in the dictionary.
-func (d *Dict) Len() uint32 {
+func (d *Dict) Len() uint64 {
 	return d.idx.Header.NextID
 }
 
@@ -236,7 +236,7 @@ func (d *Dict) Close() error {
 	return nil
 }
 
-func (d *Dict) getFromDisk(s string, keyType KeyType) (uint32, error) {
+func (d *Dict) getFromDisk(s string, keyType KeyType) (uint64, error) {
 	c := codec.Get(keyType)
 	if c == nil {
 		return 0, fmt.Errorf("dict: unknown key type %d", keyType)
@@ -282,7 +282,7 @@ func (d *Dict) getFromDisk(s string, keyType KeyType) (uint32, error) {
 			return d.dat.Iterate(func(offset int64, kt codec.KeyType, enc []byte) error {
 				h := internal.HashKey(kt, enc)
 				cb := internal.CtrlByte(h)
-				newIdx.Insert(h, cb, newIdx.Header.LiveEntries, offset)
+				newIdx.Insert(h, cb, uint64(newIdx.Header.LiveEntries), offset)
 				return nil
 			})
 		}); err != nil {
@@ -294,7 +294,7 @@ func (d *Dict) getFromDisk(s string, keyType KeyType) (uint32, error) {
 }
 
 func (d *Dict) rebuildIndex() error {
-	nextID := uint32(0)
+	nextID := uint64(0)
 	return d.dat.Iterate(func(offset int64, keyType codec.KeyType, encoded []byte) error {
 		h := internal.HashKey(keyType, encoded)
 		cb := internal.CtrlByte(h)
@@ -310,7 +310,7 @@ func (d *Dict) rebuildIndex() error {
 				return d.dat.Iterate(func(off int64, kt codec.KeyType, enc []byte) error {
 					h := internal.HashKey(kt, enc)
 					cb := internal.CtrlByte(h)
-					newIdx.Insert(h, cb, newIdx.Header.LiveEntries, off)
+					newIdx.Insert(h, cb, uint64(newIdx.Header.LiveEntries), off)
 					return nil
 				})
 			})
