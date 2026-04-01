@@ -1,4 +1,4 @@
-module github.com/johann/dict
+module github.com/tulpenhaendler/dict
 
 go 1.22.2
 
