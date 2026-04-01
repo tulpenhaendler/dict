@@ -1,6 +1,6 @@
 # dict
 
-A persistent dictionary that maps typed strings to sequential `uint32` IDs. Designed for multi-chain blockchain indexers where you need to assign compact integer IDs to addresses, hashes, and other identifiers across many chains.
+A persistent dictionary that maps typed strings to sequential `uint64` IDs. Designed for multi-chain blockchain indexers where you need to assign compact integer IDs to addresses, hashes, and other identifiers across many chains.
 
 Keys are stored in a compact binary format based on their type — a Tezos address takes 21 bytes instead of 36, an Ethereum address takes 20 bytes instead of 42, etc.
 
@@ -41,11 +41,11 @@ d.Sync()  // flush to disk
 func Open(basePath string) (*Dict, error)
 func OpenWithCacheSize(basePath string, cacheSize int) (*Dict, error)
 
-func (d *Dict) Get(s string, keyType KeyType) (uint32, error)
+func (d *Dict) Get(s string, keyType KeyType) (uint64, error)
 func (d *Dict) Exists(s string, keyType KeyType) (bool, error)
-func (d *Dict) Reverse(id uint32) (string, KeyType, error)
-func (d *Dict) BatchGet(entries []BatchEntry) ([]uint32, error)
-func (d *Dict) Len() uint32
+func (d *Dict) Reverse(id uint64) (string, KeyType, error)
+func (d *Dict) BatchGet(entries []BatchEntry) ([]uint64, error)
+func (d *Dict) Len() uint64
 func (d *Dict) Sync() error
 func (d *Dict) Close() error
 ```
@@ -116,7 +116,7 @@ Auto-detects CIDv0 vs CIDv1, and the multicodec (dag-pb, raw, dag-cbor).
 Three files per dictionary:
 
 - **`.dat`** — append-only data log. Entries: `[type:1][len:1][encoded_key:N]`.
-- **`.idx`** — mmap'd hash index with split metadata (Swiss table inspired). Ctrl bytes for fast probing, separate slot array for payload.
+- **`.idx`** — mmap'd hash index with split metadata (Swiss table inspired). Ctrl bytes for fast probing, separate slot array with 16-byte slots (id:8 + offset:8).
 - **`.rev`** — mmap'd fixed-width array for reverse lookups. `rev[id]` = offset into `.dat`.
 
 The `.dat` file is the source of truth. The `.idx` and `.rev` are derived and rebuilt automatically if corrupted or missing.
