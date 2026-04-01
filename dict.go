@@ -5,11 +5,43 @@ import (
 	"path/filepath"
 
 	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/tulpenhaendler/dict/codec"
+	"github.com/tulpenhaendler/dict/internal"
+)
+
+// Re-export codec types so callers can use dict.KeyRaw etc.
+type KeyType = codec.KeyType
+
+const (
+	// Generic
+	KeyRaw    = codec.KeyRaw
+	KeyHex    = codec.KeyHex
+	KeyBase64 = codec.KeyBase64
+	KeyBase58 = codec.KeyBase58
+
+	// Tezos
+	KeyTezosAddress      = codec.KeyTezosAddress
+	KeyTezosBlockHash    = codec.KeyTezosBlockHash
+	KeyTezosSignature    = codec.KeyTezosSignature
+	KeyTezosOpHash       = codec.KeyTezosOpHash
+	KeyTezosProtocolHash = codec.KeyTezosProtocolHash
+	KeyTezosChainID      = codec.KeyTezosChainID
+	KeyTezosExprHash     = codec.KeyTezosExprHash
+	KeyTezosContextHash  = codec.KeyTezosContextHash
+	KeyTezosPayloadHash  = codec.KeyTezosPayloadHash
+	KeyTezosPubkey       = codec.KeyTezosPubkey
+
+	// EVM
+	KeyEVMAddress  = codec.KeyEVMAddress
+	KeyEVMHash32   = codec.KeyEVMHash32
+	KeyEVMSelector = codec.KeyEVMSelector
+
+	// IPFS
+	KeyIPFSCID = codec.KeyIPFSCID
 )
 
 const defaultCacheSize = 200_000
 
-// cacheKey is the LRU key: type tag + raw string to avoid encoding on cache hit.
 type cacheKey struct {
 	t KeyType
 	s string
@@ -17,9 +49,9 @@ type cacheKey struct {
 
 // Dict is a persistent dictionary mapping typed strings to sequential uint32 IDs.
 type Dict struct {
-	dat   *dataLog
-	idx   *hashIndex
-	rev   *reverseIndex
+	dat   *internal.DataLog
+	idx   *internal.HashIndex
+	rev   *internal.ReverseIndex
 	cache *lru.Cache[cacheKey, uint32]
 }
 
@@ -38,21 +70,21 @@ func OpenWithCacheSize(basePath string, cacheSize int) (*Dict, error) {
 	idxPath := filepath.Join(dir, base+".idx")
 	revPath := filepath.Join(dir, base+".rev")
 
-	dat, err := openDataLog(datPath)
+	dat, err := internal.OpenDataLog(datPath)
 	if err != nil {
 		return nil, fmt.Errorf("dict: open data: %w", err)
 	}
 
-	idx, err := openIndex(idxPath)
+	idx, err := internal.OpenIndex(idxPath)
 	if err != nil {
-		dat.close()
+		dat.Close()
 		return nil, fmt.Errorf("dict: open index: %w", err)
 	}
 
-	rev, err := openReverse(revPath)
+	rev, err := internal.OpenReverse(revPath)
 	if err != nil {
-		dat.close()
-		idx.close()
+		dat.Close()
+		idx.Close()
 		return nil, fmt.Errorf("dict: open reverse: %w", err)
 	}
 
@@ -60,17 +92,16 @@ func OpenWithCacheSize(basePath string, cacheSize int) (*Dict, error) {
 	if cacheSize > 0 {
 		cache, err = lru.New[cacheKey, uint32](cacheSize)
 		if err != nil {
-			dat.close()
-			idx.close()
-			rev.close()
+			dat.Close()
+			idx.Close()
+			rev.Close()
 			return nil, fmt.Errorf("dict: create cache: %w", err)
 		}
 	}
 
 	d := &Dict{dat: dat, idx: idx, rev: rev, cache: cache}
 
-	// If the index is empty but dat has data, rebuild from dat.
-	if idx.header.LiveEntries == 0 && dat.size > 0 {
+	if idx.Header.LiveEntries == 0 && dat.Size > 0 {
 		if err := d.rebuildIndex(); err != nil {
 			d.Close()
 			return nil, fmt.Errorf("dict: rebuild index: %w", err)
@@ -127,43 +158,45 @@ func (d *Dict) Exists(s string, keyType KeyType) (bool, error) {
 		}
 	}
 
-	codec := getCodec(keyType)
-	if codec == nil {
+	c := codec.Get(keyType)
+	if c == nil {
 		return false, fmt.Errorf("dict: unknown key type %d", keyType)
 	}
-	encoded, err := codec.Encode(s)
+	encoded, err := c.Encode(s)
 	if err != nil {
 		return false, err
 	}
 	var h uint32
 	if keyType == KeyRaw {
-		h = hashKeyString(keyType, s)
+		h = internal.HashKeyString(keyType, s)
 	} else {
-		h = hashKey(keyType, encoded)
+		h = internal.HashKey(keyType, encoded)
 	}
-	cb := ctrlByte(h)
-	_, found := d.idx.lookup(h, cb, keyType, encoded, d.dat)
+	cb := internal.CtrlByte(h)
+	_, found := d.idx.Lookup(h, cb, func(off int64) bool {
+		return d.dat.MatchEntry(off, keyType, encoded)
+	})
 	return found, nil
 }
 
 // Reverse returns the string and key type for a given ID.
 func (d *Dict) Reverse(id uint32) (string, KeyType, error) {
-	if id >= d.idx.header.NextID {
-		return "", 0, fmt.Errorf("dict: id %d not found (max %d)", id, d.idx.header.NextID-1)
+	if id >= d.idx.Header.NextID {
+		return "", 0, fmt.Errorf("dict: id %d not found (max %d)", id, d.idx.Header.NextID-1)
 	}
-	datOffset, err := d.rev.get(id)
+	datOffset, err := d.rev.Get(id)
 	if err != nil {
 		return "", 0, err
 	}
-	keyType, encoded, err := d.dat.readEntry(datOffset)
+	keyType, encoded, err := d.dat.ReadEntry(datOffset)
 	if err != nil {
 		return "", 0, fmt.Errorf("dict: read entry: %w", err)
 	}
-	codec := getCodec(keyType)
-	if codec == nil {
+	c := codec.Get(keyType)
+	if c == nil {
 		return "", 0, fmt.Errorf("dict: unknown key type %d in data", keyType)
 	}
-	s, err := codec.Decode(encoded)
+	s, err := c.Decode(encoded)
 	if err != nil {
 		return "", 0, fmt.Errorf("dict: decode: %w", err)
 	}
@@ -172,38 +205,36 @@ func (d *Dict) Reverse(id uint32) (string, KeyType, error) {
 
 // Len returns the number of entries in the dictionary.
 func (d *Dict) Len() uint32 {
-	return d.idx.header.NextID
+	return d.idx.Header.NextID
 }
 
 // Sync flushes all changes to disk.
 func (d *Dict) Sync() error {
-	if err := d.dat.sync(); err != nil {
+	if err := d.dat.Sync(); err != nil {
 		return err
 	}
-	if err := d.idx.sync(); err != nil {
+	if err := d.idx.Sync(); err != nil {
 		return err
 	}
-	return d.rev.sync()
+	return d.rev.Sync()
 }
 
 // Close syncs and closes all files.
 func (d *Dict) Close() error {
 	d.Sync()
-	d.dat.close()
-	d.idx.close()
-	d.rev.close()
+	d.dat.Close()
+	d.idx.Close()
+	d.rev.Close()
 	return nil
 }
 
 func (d *Dict) getFromDisk(s string, keyType KeyType) (uint32, error) {
-	codec := getCodec(keyType)
-	if codec == nil {
+	c := codec.Get(keyType)
+	if c == nil {
 		return 0, fmt.Errorf("dict: unknown key type %d", keyType)
 	}
 
-	// For raw keys, hash directly from string (zero-alloc) and use
-	// unsafe string-to-bytes for the encoded form (also zero-alloc).
-	encoded, err := codec.Encode(s)
+	encoded, err := c.Encode(s)
 	if err != nil {
 		return 0, fmt.Errorf("dict: encode: %w", err)
 	}
@@ -213,33 +244,40 @@ func (d *Dict) getFromDisk(s string, keyType KeyType) (uint32, error) {
 
 	var h uint32
 	if keyType == KeyRaw {
-		h = hashKeyString(keyType, s)
+		h = internal.HashKeyString(keyType, s)
 	} else {
-		h = hashKey(keyType, encoded)
+		h = internal.HashKey(keyType, encoded)
 	}
-	cb := ctrlByte(h)
+	cb := internal.CtrlByte(h)
 
-	if id, found := d.idx.lookup(h, cb, keyType, encoded, d.dat); found {
+	if id, found := d.idx.Lookup(h, cb, func(off int64) bool {
+		return d.dat.MatchEntry(off, keyType, encoded)
+	}); found {
 		return id, nil
 	}
 
-	// Insert — for raw codec, encoded is a view into the string via unsafe,
-	// but append copies it to disk so that's fine.
-	datOffset, err := d.dat.append(keyType, encoded)
+	datOffset, err := d.dat.Append(keyType, encoded)
 	if err != nil {
 		return 0, fmt.Errorf("dict: append: %w", err)
 	}
 
-	id := d.idx.header.NextID
-	d.idx.insert(h, cb, id, datOffset)
-	d.idx.header.NextID++
+	id := d.idx.Header.NextID
+	d.idx.Insert(h, cb, id, datOffset)
+	d.idx.Header.NextID++
 
-	if err := d.rev.set(id, datOffset); err != nil {
+	if err := d.rev.Set(id, datOffset); err != nil {
 		return 0, fmt.Errorf("dict: reverse set: %w", err)
 	}
 
-	if d.idx.needsGrow() {
-		if err := d.idx.grow(d.dat); err != nil {
+	if d.idx.NeedsGrow() {
+		if err := d.idx.Grow(func(newIdx *internal.HashIndex) error {
+			return d.dat.Iterate(func(offset int64, kt codec.KeyType, enc []byte) error {
+				h := internal.HashKey(kt, enc)
+				cb := internal.CtrlByte(h)
+				newIdx.Insert(h, cb, newIdx.Header.LiveEntries, offset)
+				return nil
+			})
+		}); err != nil {
 			return 0, fmt.Errorf("dict: grow index: %w", err)
 		}
 	}
@@ -249,18 +287,25 @@ func (d *Dict) getFromDisk(s string, keyType KeyType) (uint32, error) {
 
 func (d *Dict) rebuildIndex() error {
 	nextID := uint32(0)
-	return d.dat.iterate(func(offset int64, keyType KeyType, encoded []byte) error {
-		h := hashKey(keyType, encoded)
-		cb := ctrlByte(h)
-		d.idx.insert(h, cb, nextID, offset)
-		if err := d.rev.set(nextID, offset); err != nil {
+	return d.dat.Iterate(func(offset int64, keyType codec.KeyType, encoded []byte) error {
+		h := internal.HashKey(keyType, encoded)
+		cb := internal.CtrlByte(h)
+		d.idx.Insert(h, cb, nextID, offset)
+		if err := d.rev.Set(nextID, offset); err != nil {
 			return err
 		}
 		nextID++
-		d.idx.header.NextID = nextID
+		d.idx.Header.NextID = nextID
 
-		if d.idx.needsGrow() {
-			return d.idx.grow(d.dat)
+		if d.idx.NeedsGrow() {
+			return d.idx.Grow(func(newIdx *internal.HashIndex) error {
+				return d.dat.Iterate(func(off int64, kt codec.KeyType, enc []byte) error {
+					h := internal.HashKey(kt, enc)
+					cb := internal.CtrlByte(h)
+					newIdx.Insert(h, cb, newIdx.Header.LiveEntries, off)
+					return nil
+				})
+			})
 		}
 		return nil
 	})
