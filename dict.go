@@ -57,17 +57,19 @@ type cacheKey struct {
 }
 
 // Dict is a persistent dictionary mapping typed strings to sequential uint64 IDs.
+// IDs are assigned per key type, starting at 0 for each type.
 // All public methods are safe for concurrent use.
 type Dict struct {
-	mu    sync.RWMutex
-	dat   *internal.DataLog
-	idx   *internal.HashIndex
-	rev   *internal.ReverseIndex
-	cache *lru.Cache[cacheKey, uint64]
+	mu       sync.RWMutex
+	dat      *internal.DataLog
+	idx      *internal.HashIndex
+	revs     [codec.MaxKeyType]*internal.ReverseIndex
+	basePath string
+	cache    *lru.Cache[cacheKey, uint64]
 }
 
 // Open opens or creates a dictionary at the given base path.
-// Three files are used: <path>.dat, <path>.idx, <path>.rev
+// Files used: <path>.dat, <path>.idx, <path>.rev.<type>
 func Open(basePath string) (*Dict, error) {
 	return OpenWithCacheSize(basePath, defaultCacheSize)
 }
@@ -79,7 +81,6 @@ func OpenWithCacheSize(basePath string, cacheSize int) (*Dict, error) {
 	base := filepath.Base(basePath)
 	datPath := filepath.Join(dir, base+".dat")
 	idxPath := filepath.Join(dir, base+".idx")
-	revPath := filepath.Join(dir, base+".rev")
 
 	dat, err := internal.OpenDataLog(datPath)
 	if err != nil {
@@ -92,25 +93,22 @@ func OpenWithCacheSize(basePath string, cacheSize int) (*Dict, error) {
 		return nil, fmt.Errorf("dict: open index: %w", err)
 	}
 
-	rev, err := internal.OpenReverse(revPath)
-	if err != nil {
-		dat.Close()
-		idx.Close()
-		return nil, fmt.Errorf("dict: open reverse: %w", err)
-	}
-
 	var cache *lru.Cache[cacheKey, uint64]
 	if cacheSize > 0 {
 		cache, err = lru.New[cacheKey, uint64](cacheSize)
 		if err != nil {
 			dat.Close()
 			idx.Close()
-			rev.Close()
 			return nil, fmt.Errorf("dict: create cache: %w", err)
 		}
 	}
 
-	d := &Dict{dat: dat, idx: idx, rev: rev, cache: cache}
+	d := &Dict{
+		dat:      dat,
+		idx:      idx,
+		basePath: filepath.Join(dir, base),
+		cache:    cache,
+	}
 
 	if idx.Header.LiveEntries == 0 && dat.Size > 0 {
 		if err := d.rebuildIndex(); err != nil {
@@ -119,10 +117,23 @@ func OpenWithCacheSize(basePath string, cacheSize int) (*Dict, error) {
 		}
 	}
 
+	// Open reverse index files for active types.
+	for t := range d.idx.Header.NextIDs {
+		if d.idx.Header.NextIDs[t] > 0 && d.revs[t] == nil {
+			rev, err := internal.OpenReverse(d.revFilePath(KeyType(t)))
+			if err != nil {
+				d.Close()
+				return nil, fmt.Errorf("dict: open reverse for type %02x: %w", t, err)
+			}
+			d.revs[t] = rev
+		}
+	}
+
 	return d, nil
 }
 
 // Get returns the ID for the given key, inserting it if it doesn't exist.
+// IDs are sequential per key type, starting at 0.
 func (d *Dict) Get(s string, keyType KeyType) (uint64, error) {
 	ck := cacheKey{keyType, s}
 	if d.cache != nil {
@@ -202,38 +213,53 @@ func (d *Dict) Exists(s string, keyType KeyType) (bool, error) {
 	return found, nil
 }
 
-// Reverse returns the string and key type for a given ID.
-func (d *Dict) Reverse(id uint64) (string, KeyType, error) {
+// Reverse returns the original string for a given per-type ID.
+func (d *Dict) Reverse(id uint64, keyType KeyType) (string, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	if id >= d.idx.Header.NextID {
-		return "", 0, fmt.Errorf("dict: id %d not found (max %d)", id, d.idx.Header.NextID-1)
+	if id >= d.idx.Header.NextIDs[keyType] {
+		return "", fmt.Errorf("dict: id %d not found for type %02x (max %d)", id, byte(keyType), d.idx.Header.NextIDs[keyType]-1)
 	}
-	datOffset, err := d.rev.Get(id)
+	rev := d.revs[keyType]
+	if rev == nil {
+		return "", fmt.Errorf("dict: no reverse index for type %02x", byte(keyType))
+	}
+	datOffset, err := rev.Get(id)
 	if err != nil {
-		return "", 0, err
+		return "", err
 	}
-	keyType, encoded, err := d.dat.ReadEntry(datOffset)
+	kt, encoded, err := d.dat.ReadEntry(datOffset)
 	if err != nil {
-		return "", 0, fmt.Errorf("dict: read entry: %w", err)
+		return "", fmt.Errorf("dict: read entry: %w", err)
 	}
-	c := codec.Get(keyType)
+	c := codec.Get(kt)
 	if c == nil {
-		return "", 0, fmt.Errorf("dict: unknown key type %d in data", keyType)
+		return "", fmt.Errorf("dict: unknown key type %d in data", kt)
 	}
 	s, err := c.Decode(encoded)
 	if err != nil {
-		return "", 0, fmt.Errorf("dict: decode: %w", err)
+		return "", fmt.Errorf("dict: decode: %w", err)
 	}
-	return s, keyType, nil
+	return s, nil
 }
 
-// Len returns the number of entries in the dictionary.
+// Len returns the total number of entries across all key types.
 func (d *Dict) Len() uint64 {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	return d.idx.Header.NextID
+	var total uint64
+	for _, n := range d.idx.Header.NextIDs {
+		total += n
+	}
+	return total
+}
+
+// LenType returns the number of entries for a specific key type.
+func (d *Dict) LenType(keyType KeyType) uint64 {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.idx.Header.NextIDs[keyType]
 }
 
 // Sync flushes all changes to disk.
@@ -250,7 +276,14 @@ func (d *Dict) syncLocked() error {
 	if err := d.idx.Sync(); err != nil {
 		return err
 	}
-	return d.rev.Sync()
+	for _, rev := range d.revs {
+		if rev != nil {
+			if err := rev.Sync(); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // Close syncs and closes all files.
@@ -260,8 +293,31 @@ func (d *Dict) Close() error {
 	d.syncLocked()
 	d.dat.Close()
 	d.idx.Close()
-	d.rev.Close()
+	for i, rev := range d.revs {
+		if rev != nil {
+			rev.Close()
+			d.revs[i] = nil
+		}
+	}
 	return nil
+}
+
+func (d *Dict) revFilePath(keyType KeyType) string {
+	return fmt.Sprintf("%s.rev.%02x", d.basePath, byte(keyType))
+}
+
+// ensureRev lazily opens the reverse index file for a key type.
+// Must be called under the write lock.
+func (d *Dict) ensureRev(keyType KeyType) (*internal.ReverseIndex, error) {
+	if d.revs[keyType] != nil {
+		return d.revs[keyType], nil
+	}
+	rev, err := internal.OpenReverse(d.revFilePath(keyType))
+	if err != nil {
+		return nil, err
+	}
+	d.revs[keyType] = rev
+	return rev, nil
 }
 
 func (d *Dict) getFromDisk(s string, keyType KeyType) (uint64, error) {
@@ -297,20 +353,26 @@ func (d *Dict) getFromDisk(s string, keyType KeyType) (uint64, error) {
 		return 0, fmt.Errorf("dict: append: %w", err)
 	}
 
-	id := d.idx.Header.NextID
+	id := d.idx.Header.NextIDs[keyType]
 	d.idx.Insert(h, cb, id, datOffset)
-	d.idx.Header.NextID++
+	d.idx.Header.NextIDs[keyType]++
 
-	if err := d.rev.Set(id, datOffset); err != nil {
+	rev, err := d.ensureRev(keyType)
+	if err != nil {
+		return 0, fmt.Errorf("dict: open reverse: %w", err)
+	}
+	if err := rev.Set(id, datOffset); err != nil {
 		return 0, fmt.Errorf("dict: reverse set: %w", err)
 	}
 
 	if d.idx.NeedsGrow() {
 		if err := d.idx.Grow(func(newIdx *internal.HashIndex) error {
+			var perType [codec.MaxKeyType]uint64
 			return d.dat.Iterate(func(offset int64, kt codec.KeyType, enc []byte) error {
 				h := internal.HashKey(kt, enc)
 				cb := internal.CtrlByte(h)
-				newIdx.Insert(h, cb, uint64(newIdx.Header.LiveEntries), offset)
+				newIdx.Insert(h, cb, perType[kt], offset)
+				perType[kt]++
 				return nil
 			})
 		}); err != nil {
@@ -322,23 +384,30 @@ func (d *Dict) getFromDisk(s string, keyType KeyType) (uint64, error) {
 }
 
 func (d *Dict) rebuildIndex() error {
-	nextID := uint64(0)
 	return d.dat.Iterate(func(offset int64, keyType codec.KeyType, encoded []byte) error {
 		h := internal.HashKey(keyType, encoded)
 		cb := internal.CtrlByte(h)
-		d.idx.Insert(h, cb, nextID, offset)
-		if err := d.rev.Set(nextID, offset); err != nil {
+		id := d.idx.Header.NextIDs[keyType]
+		d.idx.Insert(h, cb, id, offset)
+
+		rev, err := d.ensureRev(keyType)
+		if err != nil {
 			return err
 		}
-		nextID++
-		d.idx.Header.NextID = nextID
+		if err := rev.Set(id, offset); err != nil {
+			return err
+		}
+
+		d.idx.Header.NextIDs[keyType]++
 
 		if d.idx.NeedsGrow() {
 			return d.idx.Grow(func(newIdx *internal.HashIndex) error {
+				var perType [codec.MaxKeyType]uint64
 				return d.dat.Iterate(func(off int64, kt codec.KeyType, enc []byte) error {
 					h := internal.HashKey(kt, enc)
 					cb := internal.CtrlByte(h)
-					newIdx.Insert(h, cb, uint64(newIdx.Header.LiveEntries), off)
+					newIdx.Insert(h, cb, perType[kt], off)
+					perType[kt]++
 					return nil
 				})
 			})

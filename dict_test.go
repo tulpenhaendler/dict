@@ -65,12 +65,12 @@ func TestReverse(t *testing.T) {
 	d.Get("gamma", KeyRaw)
 
 	for id, want := range []string{"alpha", "beta", "gamma"} {
-		got, kt, err := d.Reverse(uint64(id))
+		got, err := d.Reverse(uint64(id), KeyRaw)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got != want || kt != KeyRaw {
-			t.Fatalf("Reverse(%d) = %q %d, want %q %d", id, got, kt, want, KeyRaw)
+		if got != want {
+			t.Fatalf("Reverse(%d) = %q, want %q", id, got, want)
 		}
 	}
 }
@@ -106,7 +106,7 @@ func TestPersistence(t *testing.T) {
 		t.Fatalf("foo id = %d, want 0", id)
 	}
 
-	s, _, _ := d.Reverse(1)
+	s, _ := d.Reverse(1, KeyRaw)
 	if s != "bar" {
 		t.Fatalf("Reverse(1) = %q, want bar", s)
 	}
@@ -140,7 +140,7 @@ func TestGrow(t *testing.T) {
 	}
 
 	for i := 0; i < n; i++ {
-		s, _, err := d.Reverse(uint64(i))
+		s, err := d.Reverse(uint64(i), KeyRaw)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -163,7 +163,7 @@ func TestEmptyKey(t *testing.T) {
 		t.Fatalf("empty key id = %d, want 0", id)
 	}
 
-	s, _, _ := d.Reverse(0)
+	s, _ := d.Reverse(0, KeyRaw)
 	if s != "" {
 		t.Fatalf("Reverse(0) = %q, want empty", s)
 	}
@@ -270,14 +270,17 @@ func TestTezosAddressInDict(t *testing.T) {
 		}
 	}
 	for i, addr := range addrs {
-		s, kt, _ := d.Reverse(uint64(i))
-		if kt != KeyTezosAddress || s != addr {
+		s, err := d.Reverse(uint64(i), KeyTezosAddress)
+		if err != nil {
+			t.Fatalf("Reverse(%d): %v", i, err)
+		}
+		if s != addr {
 			t.Fatalf("Reverse(%d) = %q, want %q", i, s, addr)
 		}
 	}
 }
 
-func TestTezosTypesInDict(t *testing.T) {
+func TestTezosOtherTypes(t *testing.T) {
 	d, err := Open(tempPath(t))
 	if err != nil {
 		t.Fatal(err)
@@ -299,41 +302,64 @@ func TestTezosTypesInDict(t *testing.T) {
 		{"edpkuxf7c72ZXnw4G3LpAhCRTjrXTB7fa7kC5jAoaZhuciXjur54dN", KeyTezosPubkey},
 	}
 
-	for i, tc := range tests {
+	for _, tc := range tests {
 		id, err := d.Get(tc.value, tc.keyType)
 		if err != nil {
 			t.Fatalf("Get(%s): %v", tc.value, err)
 		}
-		if id != uint64(i) {
-			t.Fatalf("Get(%s) = %d, want %d", tc.value, id, i)
+		// Each is the first (and only) entry of its type → id 0.
+		if id != 0 {
+			t.Fatalf("Get(%s) = %d, want 0", tc.value, id)
 		}
 
-		// upsert
+		// Upsert returns the same id.
 		id2, _ := d.Get(tc.value, tc.keyType)
-		if id2 != uint64(i) {
-			t.Fatalf("upsert %s: %d != %d", tc.value, id2, i)
+		if id2 != 0 {
+			t.Fatalf("upsert %s: %d != 0", tc.value, id2)
 		}
 
-		// reverse
-		s, kt, _ := d.Reverse(uint64(i))
-		if kt != tc.keyType || s != tc.value {
-			t.Fatalf("Reverse(%d): got %q, want %q", i, s, tc.value)
+		// Reverse round-trip.
+		s, err := d.Reverse(0, tc.keyType)
+		if err != nil {
+			t.Fatalf("Reverse(0, %02x): %v", byte(tc.keyType), err)
+		}
+		if s != tc.value {
+			t.Fatalf("Reverse(0, %02x) = %q, want %q", byte(tc.keyType), s, tc.value)
 		}
 	}
 }
 
-func TestTezosNoCollisionWithRaw(t *testing.T) {
+func TestPerTypeIDs(t *testing.T) {
 	d, err := Open(tempPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer d.Close()
 
+	// Same string stored under different types gets per-type id 0.
 	addr := "tz1cSj7fTex3JPd1p1LN1fwek6AV1kH93Wwc"
 	idRaw, _ := d.Get(addr, KeyRaw)
 	idTezos, _ := d.Get(addr, KeyTezosAddress)
-	if idRaw == idTezos {
-		t.Fatalf("raw and tezos got same ID %d", idRaw)
+	if idRaw != 0 || idTezos != 0 {
+		t.Fatalf("expected both ids = 0, got raw=%d tezos=%d", idRaw, idTezos)
+	}
+
+	// They reverse independently.
+	sRaw, _ := d.Reverse(0, KeyRaw)
+	sTezos, _ := d.Reverse(0, KeyTezosAddress)
+	if sRaw != addr || sTezos != addr {
+		t.Fatalf("reverse mismatch: raw=%q tezos=%q", sRaw, sTezos)
+	}
+
+	// Total count is 2 (one per type).
+	if d.Len() != 2 {
+		t.Fatalf("Len = %d, want 2", d.Len())
+	}
+	if d.LenType(KeyRaw) != 1 {
+		t.Fatalf("LenType(Raw) = %d, want 1", d.LenType(KeyRaw))
+	}
+	if d.LenType(KeyTezosAddress) != 1 {
+		t.Fatalf("LenType(TezosAddress) = %d, want 1", d.LenType(KeyTezosAddress))
 	}
 }
 
@@ -353,18 +379,18 @@ func TestEVMTypesInDict(t *testing.T) {
 		{"0xa9059cbb", KeyEVMSelector},
 	}
 
-	for i, tc := range tests {
+	for _, tc := range tests {
 		id, err := d.Get(tc.value, tc.keyType)
 		if err != nil {
 			t.Fatalf("Get(%s): %v", tc.value, err)
 		}
-		if id != uint64(i) {
-			t.Fatalf("Get(%s) = %d, want %d", tc.value, id, i)
+		// Each is the first entry of its type.
+		if id != 0 {
+			t.Fatalf("Get(%s) = %d, want 0", tc.value, id)
 		}
-		// upsert
 		id2, _ := d.Get(tc.value, tc.keyType)
-		if id2 != uint64(i) {
-			t.Fatalf("upsert: %d != %d", id2, i)
+		if id2 != 0 {
+			t.Fatalf("upsert: %d != 0", id2)
 		}
 	}
 }
@@ -390,8 +416,11 @@ func TestIPFSCIDInDict(t *testing.T) {
 		if id != uint64(i) {
 			t.Fatalf("Get(%s) = %d, want %d", cid, id, i)
 		}
-		s, kt, _ := d.Reverse(uint64(i))
-		if kt != KeyIPFSCID || s != cid {
+		s, err := d.Reverse(uint64(i), KeyIPFSCID)
+		if err != nil {
+			t.Fatalf("Reverse(%d): %v", i, err)
+		}
+		if s != cid {
 			t.Fatalf("Reverse(%d) = %q, want %q", i, s, cid)
 		}
 	}
@@ -412,13 +441,14 @@ func TestGenericEncodingsInDict(t *testing.T) {
 		{"SGVsbG8gV29ybGQ=", KeyBase64},
 	}
 
-	for i, tc := range tests {
+	for _, tc := range tests {
 		id, err := d.Get(tc.value, tc.keyType)
 		if err != nil {
 			t.Fatalf("Get(%s): %v", tc.value, err)
 		}
-		if id != uint64(i) {
-			t.Fatalf("Get(%s) = %d, want %d", tc.value, id, i)
+		// Each is the first entry of its type.
+		if id != 0 {
+			t.Fatalf("Get(%s) = %d, want 0", tc.value, id)
 		}
 	}
 }
@@ -504,7 +534,7 @@ func TestConcurrentReadWrite(t *testing.T) {
 			defer readers.Done()
 			for i := 0; i < 5000; i++ {
 				d.Exists("pre-50", KeyRaw)
-				d.Reverse(0)
+				d.Reverse(0, KeyRaw)
 				d.Len()
 			}
 		}()
@@ -555,12 +585,12 @@ func TestConcurrentGrow(t *testing.T) {
 			if err != nil {
 				t.Fatalf("verify Get(%q): %v", key, err)
 			}
-			s, kt, err := d.Reverse(id)
+			s, err := d.Reverse(id, KeyRaw)
 			if err != nil {
 				t.Fatalf("Reverse(%d): %v", id, err)
 			}
-			if kt != KeyRaw || s != key {
-				t.Fatalf("Reverse(%d) = (%q, %d), want (%q, %d)", id, s, kt, key, KeyRaw)
+			if s != key {
+				t.Fatalf("Reverse(%d) = %q, want %q", id, s, key)
 			}
 		}
 	}

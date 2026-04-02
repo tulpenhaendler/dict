@@ -6,25 +6,31 @@ import (
 	"os"
 	"syscall"
 	"unsafe"
+
+	"github.com/tulpenhaendler/dict/codec"
 )
 
 const (
 	IdxMagic      = 0x58444944 // "DIDX"
-	IdxVersion    = 2          // v2: uint64 IDs
-	IdxHeaderSize = 64
+	IdxVersion    = 3          // v3: per-type uint64 IDs
+	idxMaxTypes   = 80         // must be >= codec.MaxKeyType
+	IdxHeaderSize = 1024
 	SlotSize      = 16 // id(8) + datOffset(8)
 	InitialSlots  = 1 << 16
 	MaxLoadNum    = 7
 	MaxLoadDen    = 10
 )
 
+// Compile-time check that idxMaxTypes covers all codec key types.
+var _ [idxMaxTypes - int(codec.MaxKeyType)]byte
+
 type IdxHeader struct {
 	Magic       uint32
 	Version     uint32
 	SlotCount   uint32
 	LiveEntries uint32
-	NextID      uint64
-	_           [40]byte
+	NextIDs     [idxMaxTypes]uint64
+	_           [368]byte // pad to IdxHeaderSize (1024)
 }
 
 type HashIndex struct {
@@ -60,32 +66,46 @@ func OpenIndex(path string) (*HashIndex, error) {
 		return nil, err
 	}
 	if info.Size() == 0 {
-		size := IdxFileSize(InitialSlots)
-		if err := f.Truncate(int64(size)); err != nil {
-			f.Close()
-			return nil, err
-		}
-		idx, err := mmapIndex(f, InitialSlots)
-		if err != nil {
-			return nil, err
-		}
-		idx.Header.Magic = IdxMagic
-		idx.Header.Version = IdxVersion
-		idx.Header.SlotCount = InitialSlots
-		return idx, nil
+		return createFreshIndex(f, InitialSlots)
 	}
-	var buf [IdxHeaderSize]byte
-	if _, err := f.ReadAt(buf[:], 0); err != nil {
+
+	// Read magic and version to detect incompatible formats.
+	var peek [8]byte
+	if _, err := f.ReadAt(peek[:], 0); err != nil {
 		f.Close()
 		return nil, err
 	}
-	magic := BO.Uint32(buf[0:4])
-	slotCount := BO.Uint32(buf[8:12])
-	if magic != IdxMagic {
+	magic := BO.Uint32(peek[0:4])
+	version := BO.Uint32(peek[4:8])
+	if magic != IdxMagic || version != IdxVersion {
+		// Incompatible format; recreate (data log will drive rebuild).
 		f.Close()
-		return nil, fmt.Errorf("dict: bad index magic %x", magic)
+		return CreateIndex(path, InitialSlots)
 	}
+
+	var hbuf [16]byte
+	if _, err := f.ReadAt(hbuf[:], 0); err != nil {
+		f.Close()
+		return nil, err
+	}
+	slotCount := BO.Uint32(hbuf[8:12])
 	return mmapIndex(f, slotCount)
+}
+
+func createFreshIndex(f *os.File, slotCount uint32) (*HashIndex, error) {
+	size := IdxFileSize(slotCount)
+	if err := f.Truncate(int64(size)); err != nil {
+		f.Close()
+		return nil, err
+	}
+	idx, err := mmapIndex(f, slotCount)
+	if err != nil {
+		return nil, err
+	}
+	idx.Header.Magic = IdxMagic
+	idx.Header.Version = IdxVersion
+	idx.Header.SlotCount = slotCount
+	return idx, nil
 }
 
 func mmapIndex(f *os.File, slotCount uint32) (*HashIndex, error) {
@@ -159,7 +179,7 @@ func (ix *HashIndex) Grow(rebuild func(*HashIndex) error) error {
 	newIdx.Header.Magic = IdxMagic
 	newIdx.Header.Version = IdxVersion
 	newIdx.Header.SlotCount = newCount
-	newIdx.Header.NextID = ix.Header.NextID
+	newIdx.Header.NextIDs = ix.Header.NextIDs
 	newIdx.Header.LiveEntries = 0
 
 	if err := rebuild(newIdx); err != nil {
