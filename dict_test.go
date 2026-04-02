@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -418,6 +419,149 @@ func TestGenericEncodingsInDict(t *testing.T) {
 		}
 		if id != uint64(i) {
 			t.Fatalf("Get(%s) = %d, want %d", tc.value, id, i)
+		}
+	}
+}
+
+// --- Concurrency tests ---
+
+func TestConcurrentGet(t *testing.T) {
+	d, err := Open(tempPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	const goroutines = 16
+	const keysPerGoroutine = 1000
+	var wg sync.WaitGroup
+
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func() {
+			defer wg.Done()
+			for i := 0; i < keysPerGoroutine; i++ {
+				key := fmt.Sprintf("key-%d", i)
+				if _, err := d.Get(key, KeyRaw); err != nil {
+					t.Errorf("Get(%q): %v", key, err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	if d.Len() != keysPerGoroutine {
+		t.Fatalf("Len = %d, want %d", d.Len(), keysPerGoroutine)
+	}
+
+	// Verify each key has a stable, unique ID.
+	seen := make(map[uint64]string)
+	for i := 0; i < keysPerGoroutine; i++ {
+		key := fmt.Sprintf("key-%d", i)
+		id, _ := d.Get(key, KeyRaw)
+		if prev, ok := seen[id]; ok && prev != key {
+			t.Fatalf("ID %d maps to both %q and %q", id, prev, key)
+		}
+		seen[id] = key
+	}
+}
+
+func TestConcurrentReadWrite(t *testing.T) {
+	d, err := Open(tempPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	// Pre-populate
+	for i := 0; i < 100; i++ {
+		d.Get(fmt.Sprintf("pre-%d", i), KeyRaw)
+	}
+
+	done := make(chan struct{})
+	var readers sync.WaitGroup
+	var writer sync.WaitGroup
+
+	// Writer: insert new keys until readers are done.
+	writer.Add(1)
+	go func() {
+		defer writer.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			d.Get(fmt.Sprintf("new-%d", i), KeyRaw)
+		}
+	}()
+
+	// Readers: each does finite work concurrently with the writer.
+	for r := 0; r < 8; r++ {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for i := 0; i < 5000; i++ {
+				d.Exists("pre-50", KeyRaw)
+				d.Reverse(0)
+				d.Len()
+			}
+		}()
+	}
+
+	readers.Wait()
+	close(done)
+	writer.Wait()
+}
+
+func TestConcurrentGrow(t *testing.T) {
+	d, err := Open(tempPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	const goroutines = 8
+	const keysPerGoroutine = 5000
+	var wg sync.WaitGroup
+
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		g := g
+		go func() {
+			defer wg.Done()
+			for i := 0; i < keysPerGoroutine; i++ {
+				key := fmt.Sprintf("g%d-k%d", g, i)
+				if _, err := d.Get(key, KeyRaw); err != nil {
+					t.Errorf("Get(%q): %v", key, err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	expected := uint64(goroutines * keysPerGoroutine)
+	if d.Len() != expected {
+		t.Fatalf("Len = %d, want %d", d.Len(), expected)
+	}
+
+	// Verify all keys round-trip.
+	for g := 0; g < goroutines; g++ {
+		for i := 0; i < keysPerGoroutine; i++ {
+			key := fmt.Sprintf("g%d-k%d", g, i)
+			id, err := d.Get(key, KeyRaw)
+			if err != nil {
+				t.Fatalf("verify Get(%q): %v", key, err)
+			}
+			s, kt, err := d.Reverse(id)
+			if err != nil {
+				t.Fatalf("Reverse(%d): %v", id, err)
+			}
+			if kt != KeyRaw || s != key {
+				t.Fatalf("Reverse(%d) = (%q, %d), want (%q, %d)", id, s, kt, key, KeyRaw)
+			}
 		}
 	}
 }

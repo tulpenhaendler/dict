@@ -3,6 +3,7 @@ package dict
 import (
 	"fmt"
 	"path/filepath"
+	"sync"
 
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/tulpenhaendler/dict/codec"
@@ -56,7 +57,9 @@ type cacheKey struct {
 }
 
 // Dict is a persistent dictionary mapping typed strings to sequential uint64 IDs.
+// All public methods are safe for concurrent use.
 type Dict struct {
+	mu    sync.RWMutex
 	dat   *internal.DataLog
 	idx   *internal.HashIndex
 	rev   *internal.ReverseIndex
@@ -128,7 +131,16 @@ func (d *Dict) Get(s string, keyType KeyType) (uint64, error) {
 		}
 	}
 
+	d.mu.Lock()
+	// Double-check: another goroutine may have inserted while we waited.
+	if d.cache != nil {
+		if id, ok := d.cache.Get(ck); ok {
+			d.mu.Unlock()
+			return id, nil
+		}
+	}
 	id, err := d.getFromDisk(s, keyType)
+	d.mu.Unlock()
 	if err != nil {
 		return 0, err
 	}
@@ -166,6 +178,9 @@ func (d *Dict) Exists(s string, keyType KeyType) (bool, error) {
 		}
 	}
 
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
 	c := codec.Get(keyType)
 	if c == nil {
 		return false, fmt.Errorf("dict: unknown key type %d", keyType)
@@ -189,6 +204,9 @@ func (d *Dict) Exists(s string, keyType KeyType) (bool, error) {
 
 // Reverse returns the string and key type for a given ID.
 func (d *Dict) Reverse(id uint64) (string, KeyType, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
 	if id >= d.idx.Header.NextID {
 		return "", 0, fmt.Errorf("dict: id %d not found (max %d)", id, d.idx.Header.NextID-1)
 	}
@@ -213,11 +231,19 @@ func (d *Dict) Reverse(id uint64) (string, KeyType, error) {
 
 // Len returns the number of entries in the dictionary.
 func (d *Dict) Len() uint64 {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	return d.idx.Header.NextID
 }
 
 // Sync flushes all changes to disk.
 func (d *Dict) Sync() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.syncLocked()
+}
+
+func (d *Dict) syncLocked() error {
 	if err := d.dat.Sync(); err != nil {
 		return err
 	}
@@ -229,7 +255,9 @@ func (d *Dict) Sync() error {
 
 // Close syncs and closes all files.
 func (d *Dict) Close() error {
-	d.Sync()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.syncLocked()
 	d.dat.Close()
 	d.idx.Close()
 	d.rev.Close()
